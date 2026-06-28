@@ -1,0 +1,22 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente
+.env
+
+# Sessão do WhatsApp
+.wwebjs_auth/
+.wwebjs_cache/
+
+# PM2
+.pm2/
+
+# Fly.io
+Dockerfile
+fly.toml
+
+# Logs
+npm-debug.log*
+
+# Mac
+.DS_Store
