@@ -42,6 +42,14 @@ async function main() {
     console.log('✅ WhatsApp pronto. Aguardando mensagens no grupo:', groupName);
   });
 
+  client.on('disconnected', (reason) => {
+    console.log('⚠️ WhatsApp desconectado:', reason);
+    console.log('🔄 Tentando reconectar em 10 segundos...');
+    setTimeout(() => {
+      client.initialize();
+    }, 10000);
+  });
+
   client.on('message_create', async message => {
       console.log('📨 Qualquer mensagem:', message.body);
     try {
