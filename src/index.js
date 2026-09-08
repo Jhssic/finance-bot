@@ -1,6 +1,7 @@
 require('dotenv').config();
 const qrcode = require('qrcode-terminal');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const { interpretMessage } = require('./gemini');
 const { handleReport } = require('./handlers/report');
 const { handleTransaction } = require('./handlers/transaction');
@@ -13,69 +14,125 @@ if (!groupName) {
   process.exit(1);
 }
 
-function getPersonName(message) {
-  const number = message.author || message.from;
-  if (message.fromMe) return 'Jhess';
-  const regiNumber = process.env.WHATSAPP_NUMBER_REGI;
-  if (regiNumber && number.includes(regiNumber)) return 'Regi';
-  return 'Regi';
+// Cache de nomes de grupos para evitar chamadas repetidas
+const groupCache = {};
+
+async function getGroupName(sock, jid) {
+  if (!groupCache[jid]) {
+    try {
+      const meta = await sock.groupMetadata(jid);
+      groupCache[jid] = meta.subject;
+    } catch {
+      groupCache[jid] = null;
+    }
+  }
+  return groupCache[jid];
 }
 
-async function main() {
-  const client = new Client({
-    authStrategy: new LocalAuth({
-      clientId: 'finance-bot',
-      dataPath: './.wwebjs_auth'
-    }),
-   puppeteer: {
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-  }
-  });
+function getTextFromMessage(msg) {
+  const m = msg.message;
+  if (!m) return '';
+  return m.conversation ||
+         m.extendedTextMessage?.text ||
+         m.imageMessage?.caption ||
+         m.videoMessage?.caption || '';
+}
 
-  client.on('qr', qr => {
-    console.log('📱 Escaneie o QR code do WhatsApp:');
-    qrcode.generate(qr, { small: true });
-  });
+function getPersonName(msg) {
+  if (msg.key.fromMe) return 'Jhess';
+  const participant = msg.key.participant || msg.key.remoteJid;
+  const regiNumber = process.env.WHATSAPP_NUMBER_REGI;
+  if (regiNumber && participant.includes(regiNumber)) return 'Regi';
+  return 'Regi'; // padrão para outros números
+}
 
-  client.on('ready', () => {
-    console.log('✅ WhatsApp pronto. Aguardando mensagens no grupo:', groupName);
-  });
-
-  client.on('disconnected', (reason) => {
-    console.log('⚠️ WhatsApp desconectado:', reason);
-    console.log('🔄 Tentando reconectar em 10 segundos...');
-    setTimeout(() => {
-      client.initialize();
-    }, 10000);
-  });
-
-  client.on('message_create', async message => {
-      console.log('📨 Qualquer mensagem:', message.body);
-    try {
-      if (message.body.startsWith('✅') || message.body.startsWith('❌')) return;
-
-      const chat = await message.getChat();
-      if (!chat.isGroup) return;
-      if (chat.name !== groupName) return;
-
-      console.log('📩 Mensagem recebida:', message.body, '| fromMe:', message.fromMe);
-
-      const text = message.body.trim();
-      const author = getPersonName(message);
-      const normalized = text.toLowerCase();
-
-      if (normalized.startsWith('!grafico')) {
-        const type = normalized.replace('!grafico', '').trim() || 'pizza';
-        await handleChart(message, type);
-        return;
+// Wrapper de compatibilidade: adiciona .reply() ao objeto de mensagem
+function buildMessage(sock, msg, remoteJid) {
+  return {
+    body: getTextFromMessage(msg),
+    fromMe: msg.key.fromMe,
+    author: msg.key.participant || msg.key.remoteJid,
+    from: remoteJid,
+    reply: async (content, _, options) => {
+      if (typeof content === 'string') {
+        await sock.sendMessage(remoteJid, { text: content }, { quoted: msg });
+      } else if (content && content.data) {
+        // objeto media vindo do chart.js
+        const buffer = Buffer.from(content.data, 'base64');
+        await sock.sendMessage(remoteJid, {
+          image: buffer,
+          caption: options?.caption || ''
+        }, { quoted: msg });
       }
+    }
+  };
+}
 
-      const handled = await handleEdit(message, text);
-      if (handled) return;
+async function connectToWhatsApp() {
+  const { state, saveCreds } = await useMultiFileAuthState('.baileys_auth');
+  const { version } = await fetchLatestBaileysVersion();
 
-      if (normalized === 'menu' || normalized === '!menu' || normalized === 'ajuda' || normalized === '!ajuda') {
-        await message.reply(`🤖 *Comandos disponíveis:*
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      console.log('📱 Escaneie o QR code do WhatsApp:');
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log('⚠️ Conexão encerrada. Reconectando:', shouldReconnect);
+      if (shouldReconnect) {
+        setTimeout(connectToWhatsApp, 5000);
+      }
+    }
+
+    if (connection === 'open') {
+      console.log('✅ WhatsApp pronto. Aguardando mensagens no grupo:', groupName);
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type: upsertType }) => {
+    if (upsertType !== 'notify') return;
+
+    for (const msg of messages) {
+      try {
+        const remoteJid = msg.key.remoteJid;
+        if (!remoteJid.endsWith('@g.us')) continue;
+
+        const text = getTextFromMessage(msg);
+        if (!text) continue;
+        if (text.startsWith('✅') || text.startsWith('❌')) continue;
+
+        const name = await getGroupName(sock, remoteJid);
+        if (name !== groupName) continue;
+
+        console.log('📩 Mensagem recebida:', text, '| fromMe:', msg.key.fromMe);
+
+        const message = buildMessage(sock, msg, remoteJid);
+        const author = getPersonName(msg);
+        const normalized = text.toLowerCase().trim();
+
+        if (normalized.startsWith('!grafico')) {
+          const chartType = normalized.replace('!grafico', '').trim() || 'pizza';
+          await handleChart(message, chartType);
+          continue;
+        }
+
+        const handled = await handleEdit(message, text);
+        if (handled) continue;
+
+        if (normalized === 'menu' || normalized === '!menu' || normalized === 'ajuda' || normalized === '!ajuda') {
+          await message.reply(`🤖 *Comandos disponíveis:*
 
         💰 *Registrar gasto:*
         mercado 85,90
@@ -100,34 +157,33 @@ async function main() {
         ✏️ *Editar e deletar:*
         !editar ID valor 90
         !deletar ID`);
-        return;
+          continue;
+        }
+
+        const isReportCommand = normalized.startsWith('!resumo') || normalized.startsWith('!saldo');
+        if (isReportCommand) {
+          await handleReport(message, normalized.startsWith('!saldo') ? 'saldo' : 'resumo');
+          continue;
+        }
+
+        const parsed = await interpretMessage(text, author);
+        if (!parsed) continue;
+
+        if (parsed.action === 'query') {
+          await handleReport(message, parsed.queryType || 'resumo');
+          continue;
+        }
+
+        if (parsed.action === 'transaction') {
+          await handleTransaction(message, parsed);
+          continue;
+        }
+
+      } catch (error) {
+        console.error('Erro ao processar mensagem:', error);
       }
-
-      const isReportCommand = normalized.startsWith('!resumo') || normalized.startsWith('!saldo');
-      if (isReportCommand) {
-        await handleReport(message, normalized.startsWith('!saldo') ? 'saldo' : 'resumo');
-        return;
-      }
-
-      const parsed = await interpretMessage(text, author);
-      if (!parsed) return;
-
-      if (parsed.action === 'query') {
-        await handleReport(message, parsed.queryType || 'resumo');
-        return;
-      }
-
-      if (parsed.action === 'transaction') {
-        await handleTransaction(message, parsed);
-        return;
-      }
-
-    } catch (error) {
-      console.error('Erro ao processar mensagem:', error);
     }
   });
-
-  client.initialize();
 }
 
-main();
+connectToWhatsApp();

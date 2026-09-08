@@ -1,4 +1,3 @@
-const { MessageMedia } = require('whatsapp-web.js');
 const { ChartJSNodeCanvas } = require('chartjs-node-canvas');
 const { getMonthlySummary, getMonthlyHistory, getPersonSummary, getDailySaldo } = require('../notion');
 
@@ -133,7 +132,7 @@ async function handleChart(message, type) {
       caption = '🥧 Gastos por categoria este mês';
     }
 
-    const media = new MessageMedia('image/png', imageBuffer.toString('base64'), 'grafico.png');
+    const media = { mimetype: 'image/png', data: imageBuffer.toString('base64'), filename: 'grafico.png' };
     await message.reply(media, null, { caption });
   } catch (error) {
     console.error('Erro handleChart:', error.message || error);
