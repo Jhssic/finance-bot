@@ -34,9 +34,53 @@ function getTextFromMessage(msg) {
   if (!m) return '';
   return m.conversation ||
          m.extendedTextMessage?.text ||
+         m.listResponseMessage?.singleSelectReply?.selectedRowId ||
          m.imageMessage?.caption ||
          m.videoMessage?.caption || '';
 }
+
+// Monta o menu interativo (botão "Ver opções" com lista clicável)
+function buildMenuList() {
+  return {
+    text: '👋 Escolha uma opção abaixo ou digite um comando diretamente.',
+    footer: 'Finance Bot 💸',
+    title: '🤖 Menu Principal',
+    buttonText: 'Ver opções',
+    sections: [
+      {
+        title: '📊 Relatórios',
+        rows: [
+          { title: 'Resumo do mês', rowId: '!resumo', description: 'Entradas, gastos e saldo' },
+          { title: 'Saldo atual', rowId: '!saldo', description: 'Saldo do mês' }
+        ]
+      },
+      {
+        title: '📈 Gráficos',
+        rows: [
+          { title: 'Pizza por categoria', rowId: '!grafico', description: 'Gastos do mês por categoria' },
+          { title: 'Barras — Entradas vs Gastos', rowId: '!grafico barras', description: 'Últimos 6 meses' },
+          { title: 'Gastos da Jhess', rowId: '!grafico jhess', description: 'Categorias da Jhess no mês' },
+          { title: 'Gastos do Regi', rowId: '!grafico regi', description: 'Categorias do Regi no mês' },
+          { title: 'Evolução do saldo', rowId: '!grafico linha', description: 'Saldo dia a dia no mês' }
+        ]
+      },
+      {
+        title: '✏️ Como usar',
+        rows: [
+          { title: 'Como registrar um gasto', rowId: '!ajuda-gasto', description: 'Ex: mercado 85,90' },
+          { title: 'Como registrar uma entrada', rowId: '!ajuda-entrada', description: 'Ex: recebi salario 3200' },
+          { title: 'Como editar ou deletar', rowId: '!ajuda-editar', description: 'Ex: !editar ID valor 90' }
+        ]
+      }
+    ]
+  };
+}
+
+const HELP_TEXTS = {
+  '!ajuda-gasto': '💰 *Para registrar um gasto, envie algo como:*\n\nmercado 85,90\ngastei 50 no uber\nalmoço 32,00',
+  '!ajuda-entrada': '💵 *Para registrar uma entrada, envie algo como:*\n\nrecebi salario 3200\nentrou 500 do freela',
+  '!ajuda-editar': '✏️ *Para editar ou deletar:*\n\n!editar ID valor 90\n!deletar ID'
+};
 
 function getPersonName(msg) {
   if (msg.key.fromMe) return 'Jhess';
@@ -122,6 +166,16 @@ async function connectToWhatsApp() {
         const author = getPersonName(msg);
         const normalized = text.toLowerCase().trim();
 
+        if (normalized === 'menu' || normalized === '!menu' || normalized === 'ajuda' || normalized === '!ajuda') {
+          await sock.sendMessage(remoteJid, buildMenuList(), { quoted: msg });
+          continue;
+        }
+
+        if (HELP_TEXTS[normalized]) {
+          await message.reply(HELP_TEXTS[normalized]);
+          continue;
+        }
+
         if (normalized.startsWith('!grafico')) {
           const chartType = normalized.replace('!grafico', '').trim() || 'pizza';
           await handleChart(message, chartType);
@@ -130,35 +184,6 @@ async function connectToWhatsApp() {
 
         const handled = await handleEdit(message, text);
         if (handled) continue;
-
-        if (normalized === 'menu' || normalized === '!menu' || normalized === 'ajuda' || normalized === '!ajuda') {
-          await message.reply(`🤖 *Comandos disponíveis:*
-
-        💰 *Registrar gasto:*
-        mercado 85,90
-        gastei 50 no uber
-        almoço 32,00
-
-        💵 *Registrar entrada:*
-        recebi salario 3200
-        entrou 500 do freela
-
-        📊 *Relatórios:*
-        !resumo — resumo do mês
-        !saldo — saldo atual
-
-        📈 *Gráficos:*
-        !grafico — pizza por categoria
-        !grafico barras — entradas vs gastos
-        !grafico jhess — gastos da Jhess
-        !grafico regi — gastos do Regi
-        !grafico linha — evolução do saldo
-
-        ✏️ *Editar e deletar:*
-        !editar ID valor 90
-        !deletar ID`);
-          continue;
-        }
 
         const isReportCommand = normalized.startsWith('!resumo') || normalized.startsWith('!saldo');
         if (isReportCommand) {
